@@ -1,6 +1,6 @@
 # Playwright-Grid
 
-这个项目展示了一个基于WebSocket的通信系统，该系统使用FastAPI和Playwright实现中央hub和多个节点之间的通信。Hub管理连接、分发请求并处理响应，而节点执行网页抓取任务并将数据返回给hub。
+这个项目展示了一个基于WebSocket的通信系统，该系统使用FastAPI和Playwright实现中央hub和多个节点之间的通信。Hub管理连接、分发请求并处理响应，而节点执行网页抓取任务并将数据返回给hub。当前功能只涉及到采集列表页、详情页、搜索、截图、配置代理功能。
 
 ## 目录
 
@@ -8,14 +8,13 @@
 - [使用](#使用)
 - [Hub 详情](#hub-详情)
 - [Node 详情](#node-详情)
-- [许可证](#许可证)
 
 ## 安装
 
 1. 克隆仓库：
     ```bash
-    git clone <repository_url>
-    cd <repository_directory>
+    git clone https://github.com/xyuns-cn/Playwright-Grid.git
+    cd Playwright-Grid
     ```
 
 2. 安装所需依赖：
@@ -34,7 +33,7 @@
 
 启动hub服务器，使用以下命令：
 ```bash
-uvicorn hub:app --host 0.0.0.0 --port 8000
+python hub.py
 ```
 
 ### 运行 Node
@@ -43,16 +42,11 @@ uvicorn hub:app --host 0.0.0.0 --port 8000
 ```bash
 python node_playwright.py --hub <hub_ip>:<hub_port>
 ```
-将 `<hub_ip>` 和 `<hub_port>` 替换为hub服务器的IP地址和端口。
+如果 Hub 和 Node 在同一网段，则无需配置 Hub 地址，Node 会自动找到 Hub 并建立心跳连接。如果它们部署在不同网段，则需要将 `<hub_ip>` 和 `<hub_port>` 替换为 Hub 服务器的 IP 地址和端口。
 
 ## Hub 详情
 
 Hub负责管理WebSocket连接并向连接的节点分发请求。它使用FastAPI处理WebSocket连接并提供HTTP端点用于发送请求。
-
-### 关键组件：
-
-- **ConnectionManager**: 管理活跃的WebSocket连接和待处理的响应。
-- **WebSocket 端点**: 处理节点的连接、断开连接和消息接收。
 
 ### API 端点：
 
