@@ -74,7 +74,7 @@ python hub.py
 
 ### 示例请求
 
-发送POST请求到`/capture`，完整请求体示例如下：
+发送POST请求到`http://<hub_ip>:<hub_port>/capture`，完整请求体示例如下：
 ```json
 {
   "url": "https://example.com",                 // 必填项：需要访问的网页地址
@@ -106,5 +106,5 @@ python hub.py
 }
 
 ```
-注：列表页和详情页不可同时采集。
+注：列表页和详情页不可同时采集，选择器都为可选项。
 
