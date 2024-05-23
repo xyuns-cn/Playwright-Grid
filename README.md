@@ -92,16 +92,16 @@ python hub.py
     "search_term": "example search"               // 搜索词
   },
   "items_config": {                             // 可选项：列表页抓取配置
-    "enabled": true,                              // 是否启用项目抓取
-    "item_selector": ".item",                     // 每个项目的选择器，可以是CSS选择器或XPath
+    "enabled": true,                              // 是否启用列表页抓取
+    "item_selector": ".item",                     // 每个列表的选择器，可以是CSS选择器或XPath
     "title_selector": ".title",                   // 项目标题的选择器，可以是CSS选择器或XPath
     "date_selector": ".date"                      // 项目日期的选择器，可以是CSS选择器或XPath
   },
   "body_config": {                              // 可选项：正文抓取配置
     "enabled": false,                             // 是否启用正文抓取
-    "body_selectors": ["#content"],               // 正文内容的选择器，可以是CSS选择器或XPath
-    "title_selectors": ["h1"],                    // 正文标题的选择器，可以是CSS选择器或XPath
-    "date_selectors": [".date"]                   // 正文日期的选择器，可以是CSS选择器或XPath
+    "body_selectors": ["#content"],               // 正文内容的选择器，可以配置多个，可以是CSS选择器或XPath
+    "title_selectors": ["h1"],                    // 正文标题的选择器，可以配置多个，可以是CSS选择器或XPath
+    "date_selectors": [".date"]                   // 正文日期的选择器，可以配置多个，可以是CSS选择器或XPath
   }
 }
 
