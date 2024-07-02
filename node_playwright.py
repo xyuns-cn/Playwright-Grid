@@ -6,35 +6,29 @@
 # @Describe:
 import asyncio
 import base64
-import websockets
 import json
 import socket
 import uuid
 import argparse
-
-from fastapi import HTTPException
-from pydantic import BaseModel, Field
+import sys
 from typing import List, Optional
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from datetime import datetime
 
+import websockets
+from loguru import logger
+from pydantic import BaseModel, Field
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from fake_useragent import UserAgent
+
+# 配置
 BROADCAST_PORT = 37020
-hub_address = None
-node_id = str(uuid.uuid4())
-heartbeat_interval = 3
+HEARTBEAT_INTERVAL = 3
+NODE_ID = str(uuid.uuid4())
 
-
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="启动参数")
-    parser.add_argument('--hub', type=str, help='指定hub地址，格式为 host:port')
-    args = parser.parse_args()
-    if args.hub:
-        try:
-            host, port = args.hub.split(':')
-            return host, int(port)
-        except ValueError:
-            raise ValueError("Hub 地址格式应该为 host:port")
-    return None
+# 日志配置
+logger.remove()
+logger.add(sys.stdout, level="INFO")
+logger.add("node_playwright.log", rotation="100 MB", retention="10 days", level="INFO")
 
 
 class ProxyConfig(BaseModel):
@@ -74,218 +68,173 @@ class RequestBody(BaseModel):
     body_config: BodyConfig = BodyConfig()
 
 
-async def listen_for_hub():
-    global hub_address
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.bind(("", BROADCAST_PORT))
+class PlaywrightNode:
+    def __init__(self):
+        self.hub_address = None
+        self.node_state = "idle"
+        self.request_queue = asyncio.Queue()
+
+    async def listen_for_hub(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind(("", BROADCAST_PORT))
+            while True:
+                message, _ = s.recvfrom(1024)
+                hub_info = message.decode('utf-8').split(':')
+                if hub_info[0] == 'hub':
+                    self.hub_address = (hub_info[1], int(hub_info[2]))
+                    logger.info(f"发现hub地址: {self.hub_address}")
+                    break
+
+    async def send_heartbeat(self, websocket, browser_type: str):
         while True:
-            message, _ = s.recvfrom(1024)
-            hub_info = message.decode('utf-8').split(':')
-            if hub_info[0] == 'hub':
-                hub_address = (hub_info[1], int(hub_info[2]))
-                print(f"发现hub地址: {hub_address}")
-                break
-
-
-async def send_heartbeat(websocket, browser_type):
-    while True:
-        heartbeat_data = {
-            "node_id": node_id,
-            "ip": socket.gethostbyname(socket.gethostname()),
-            "browser": browser_type,
-            "timestamp": datetime.now().isoformat()
-        }
-        await websocket.send(json.dumps({"type": "heartbeat", "data": heartbeat_data}))
-        await asyncio.sleep(heartbeat_interval)
-
-
-async def wait_for_network_idle(page, timeout):
-    try:
-        await asyncio.wait_for(page.wait_for_load_state('networkidle'), timeout=timeout)
-    except asyncio.TimeoutError:
-        print(f"在 {timeout} 秒内未达到网络空闲状态，继续执行...")
-
-
-def format_size(size):
-    if size < 1024:
-        return f"{size} B"
-    elif size < 1024 ** 2:
-        return f"{size / 1024:.2f} KB"
-    elif size < 1024 ** 3:
-        return f"{size / 1024 ** 2:.2f} MB"
-    return f"{size / 1024 ** 3:.2f} GB"
-
-
-async def capture_screenshot(page):
-    screenshot = await page.screenshot()
-    screenshot_size = len(screenshot)
-    formatted_size = format_size(screenshot_size)
-    screenshot_base64 = base64.b64encode(screenshot).decode('utf-8')
-    return {
-        "size": formatted_size,
-        "base64": screenshot_base64
-    }
-
-
-async def get_items_content(page, item_selector, title_selector=None, date_selector=None):
-    await page.wait_for_selector(item_selector, timeout=10000)
-    items = await page.query_selector_all(item_selector)
-    items_content = []
-    for item in items:
-        item_content = {}
-
-        if title_selector:
-            title_element = await item.query_selector(title_selector)
-            if title_element:
-                item_content['title'] = (await title_element.text_content()).replace("\n", " ").strip()
-            else:
-                item_content['title'] = "无标题"
-
-        link_elements = await item.query_selector_all("a")
-        if link_elements:
-            item_content['links'] = [await link.get_attribute("href") for link in link_elements]
-        else:
-            item_content['links'] = ["无链接"]
-
-        if date_selector:
-            date_element = await item.query_selector(date_selector)
-            if date_element:
-                item_content['date'] = (await date_element.text_content()).replace("\n", " ").strip()
-            else:
-                item_content['date'] = "无日期"
-
-        items_content.append(item_content)
-    return items_content
-
-
-async def get_content_by_selectors(page, selectors):
-    results = []
-    for selector in selectors:
-        try:
-            await page.wait_for_selector(selector, timeout=5000)
-            element = await page.query_selector(selector)
-            if element:
-                content = (await element.text_content()).replace("\n", " ").strip()
-                results.append({"selector": selector, "content": content})
-        except PlaywrightTimeoutError:
-            results.append({"selector": selector, "content": None})
-    return results
-
-
-async def get_body_content(page, body_selectors, title_selectors, date_selectors):
-    body_content = await get_content_by_selectors(page, body_selectors) if body_selectors else [
-        {"selector": None, "content": "无正文内容"}]
-    title_content = await get_content_by_selectors(page, title_selectors) if title_selectors else [
-        {"selector": None, "content": "无标题"}]
-    date_content = await get_content_by_selectors(page, date_selectors) if date_selectors else [
-        {"selector": None, "content": "无日期"}]
-
-    return {
-        "title": title_content,
-        "body": body_content,
-        "date": date_content
-    }
-
-
-async def get_page_info(request_data: RequestBody):
-    page_info = {}
-    async with async_playwright() as p:
-        browser_type = getattr(p, request_data.browser, None)
-        if not browser_type:
-            raise HTTPException(status_code=400, detail="无效的浏览器类型")
-
-        # Configure proxy if provided
-        proxy = None
-        if request_data.proxy:
-            proxy = {
-                "server": request_data.proxy.server
-            }
-            if request_data.proxy.username and request_data.proxy.password:
-                proxy["username"] = request_data.proxy.username
-                proxy["password"] = request_data.proxy.password
-
-        browser = await browser_type.launch(headless=False, proxy=proxy)
-        page = await browser.new_page()
-
-        await page.goto(request_data.url)
-
-        if request_data.search_in.search:
             try:
-                await page.fill(request_data.search_in.search_input_selector, request_data.search_in.search_term)
-                await page.click(request_data.search_in.search_button_selector)
-            except Exception as e:
-                print(f"搜索操作失败: {e}")
+                heartbeat_data = {
+                    "node_id": NODE_ID,
+                    "ip": socket.gethostbyname(socket.gethostname()),
+                    "browser": browser_type,
+                    "method": "Playwright",
+                    "timestamp": datetime.now().isoformat(),
+                    "state": self.node_state
+                }
+                await websocket.send(json.dumps({"type": "heartbeat", "data": heartbeat_data}))
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+            except websockets.exceptions.WebSocketException as e:
+                logger.error(f"发送心跳失败: {e}")
+                await asyncio.sleep(5)
 
-        await wait_for_network_idle(page, timeout=10)
-
-        if request_data.items_config.enabled and request_data.body_config.enabled:
-            raise HTTPException(status_code=400, detail="列表页和详情页配置只能启用一个")
-
-        if request_data.items_config.enabled:
+    async def handle_websocket(self):
+        uri = f"ws://{self.hub_address[0]}:{self.hub_address[1]}/ws/{NODE_ID}"
+        async with websockets.connect(uri) as websocket:
+            heartbeat_task = asyncio.create_task(self.send_heartbeat(websocket, "chromium"))
             try:
-                page_info["items"] = await get_items_content(
-                    page,
-                    request_data.items_config.item_selector,
-                    request_data.items_config.title_selector,
-                    request_data.items_config.date_selector)
-            except PlaywrightTimeoutError:
-                page_info["items"] = []
+                while True:
+                    message = await websocket.recv()
+                    data = json.loads(message)
+                    if data.get("type") == "request":
+                        await self.request_queue.put(data["data"])
+                    elif data.get("type") == "heartbeat_ack":
+                        logger.debug("Received heartbeat acknowledgement")
+            except websockets.exceptions.ConnectionClosed:
+                logger.info("WebSocket connection closed")
+            finally:
+                heartbeat_task.cancel()
 
-        if request_data.body_config.enabled:
-            page_info["body"] = await get_body_content(
-                page,
-                request_data.body_config.body_selectors,
-                request_data.body_config.title_selectors,
-                request_data.body_config.date_selectors)
-
-        if request_data.screenshot:
-            page_info["screenshot"] = await capture_screenshot(page)
-
-        await browser.close()
-    return page_info
-
-
-async def handle_requests(websocket):
-    async for message in websocket:
-        try:
-            data = json.loads(message)
-            if data.get("type") == "request":
-                request_data = RequestBody(**data["data"])
-                page_info = await get_page_info(request_data)
+    async def process_requests(self):
+        while True:
+            request_data = await self.request_queue.get()
+            try:
+                page_info = await self.get_page_info(RequestBody(**request_data))
                 response = {"type": "response", "data": page_info}
-                await websocket.send(json.dumps(response))
-            else:
-                print(f"Unknown message type: {data.get('type')}")
-        except Exception as e:
-            error_message = {"type": "error", "data": str(e)}
-            await websocket.send(json.dumps(error_message))
+                uri = f"ws://{self.hub_address[0]}:{self.hub_address[1]}/ws/{NODE_ID}"
+                async with websockets.connect(uri) as websocket:
+                    await websocket.send(json.dumps(response))
+            except Exception as e:
+                logger.error(f"处理请求时发生错误: {e}")
+            finally:
+                self.request_queue.task_done()
 
-
-async def main():
-    global hub_address
-    hub_address = parse_arguments()  # 解析命令行输入的hub地址
-    if not hub_address:
-        print("没有指定hub地址，监听广播以获取地址")
-        await listen_for_hub()
-    else:
-        print(f"使用指定的hub地址: {hub_address}")
-
-    uri = f"ws://{hub_address[0]}:{hub_address[1]}/ws/{node_id}"
-    async with websockets.connect(uri) as websocket:
-        try:
-            await asyncio.gather(
-                send_heartbeat(websocket, "chromium"),  # 默认使用chromium浏览器
-                handle_requests(websocket)
+    async def get_page_info(self, request_data: RequestBody):
+        async with async_playwright() as p:
+            browser_type = getattr(p, request_data.browser)
+            browser = await browser_type.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=UserAgent().random,
+                proxy=request_data.proxy.dict() if request_data.proxy else None
             )
-        except KeyboardInterrupt:
-            print("程序被用户中断")
-        finally:
-            print("关闭浏览器和网络连接等资源")
-            await websocket.close()
+            page = await context.new_page()
+
+            try:
+                await page.goto(request_data.url, wait_until="networkidle")
+
+                # 执行搜索
+                if request_data.search_in.search:
+                    await page.fill(request_data.search_in.search_input_selector, request_data.search_in.search_term)
+                    await page.click(request_data.search_in.search_button_selector)
+                    await page.wait_for_load_state("networkidle")
+
+                # 获取项目列表
+                items = []
+                if request_data.items_config.enabled:
+                    elements = await page.query_selector_all(request_data.items_config.item_selector)
+                    for element in elements:
+                        title = await element.query_selector(request_data.items_config.title_selector)
+                        date = await element.query_selector(request_data.items_config.date_selector)
+                        items.append({
+                            "title": await title.inner_text() if title else None,
+                            "date": await date.inner_text() if date else None
+                        })
+
+                # 获取正文内容
+                body_content = {}
+                if request_data.body_config.enabled:
+                    for selector in request_data.body_config.body_selectors:
+                        element = await page.query_selector(selector)
+                        if element:
+                            body_content[selector] = await element.inner_text()
+
+                    for selector in request_data.body_config.title_selectors:
+                        element = await page.query_selector(selector)
+                        if element:
+                            body_content[f"title_{selector}"] = await element.inner_text()
+
+                    for selector in request_data.body_config.date_selectors:
+                        element = await page.query_selector(selector)
+                        if element:
+                            body_content[f"date_{selector}"] = await element.inner_text()
+
+                # 截图
+                screenshot = None
+                if request_data.screenshot:
+                    screenshot = await page.screenshot(full_page=True)
+                    screenshot = base64.b64encode(screenshot).decode('utf-8')
+
+                return {
+                    "url": page.url,
+                    "items": items,
+                    "body_content": body_content,
+                    "screenshot": screenshot
+                }
+
+            except PlaywrightTimeoutError:
+                logger.error(f"访问 {request_data.url} 超时")
+                return {"error": "Timeout"}
+            except Exception as e:
+                logger.error(f"处理 {request_data.url} 时发生错误: {e}")
+                return {"error": str(e)}
+            finally:
+                await browser.close()
+
+    async def run(self):
+        if not self.hub_address:
+            logger.info("没有指定hub地址，监听广播以获取地址")
+            await self.listen_for_hub()
+        else:
+            logger.info(f"使用指定的hub地址: {self.hub_address}")
+
+        tasks = [
+            asyncio.create_task(self.handle_websocket()),
+            asyncio.create_task(self.process_requests())
+        ]
+        await asyncio.gather(*tasks)
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="启动参数")
+    parser.add_argument('--hub', type=str, help='指定hub地址，格式为 host:port')
+    args = parser.parse_args()
+    if args.hub:
+        try:
+            host, port = args.hub.split(':')
+            return host, int(port)
+        except ValueError:
+            raise ValueError("Hub 地址格式应该为 host:port")
+    return None
 
 
 if __name__ == "__main__":
+    node = PlaywrightNode()
+    node.hub_address = parse_arguments()
     try:
-        asyncio.run(main())
+        asyncio.run(node.run())
     except KeyboardInterrupt:
-        print("主程序被用户中断")
+        logger.info("主程序被用户中断")
